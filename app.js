@@ -8,7 +8,11 @@ let token = localStorage.getItem('vida_customer_token') || '';
 let customer = JSON.parse(localStorage.getItem('vida_customer') || 'null');
 let wallet = JSON.parse(localStorage.getItem('vida_wallet') || 'null');
 let currentOrder = null;
+let currentScreen = '';
+let currentTrackingOrderId = '';
 let pollTimer = null;
+let socket = null;
+let liveDispatchNotice = null;
 
 // ─── API Client ───
 function getBaseUrl() { return document.getElementById('api-base').value.replace(/\/$/, ''); }
@@ -65,8 +69,46 @@ function saveState() {
     localStorage.setItem('vida_wallet', JSON.stringify(wallet));
 }
 
+function connectSocket() {
+    if (!token || typeof io === 'undefined') return;
+    if (socket) socket.disconnect();
+    socket = io(getBaseUrl(), { path: '/ws', auth: { token } });
+    socket.on('connect', () => logApiResponse('WS', 'connect', 200, { id: socket.id }));
+    socket.on('disconnect', reason => logApiResponse('WS', 'disconnect', 0, { reason }));
+    socket.on('rider_offer_sent', payload => {
+        liveDispatchNotice = payload;
+        toast('📡 ' + (payload.message || 'Offer sent to rider'));
+        updateLiveDispatchNotice(payload);
+    });
+    socket.on('rider_assigned', payload => {
+        liveDispatchNotice = { ...payload, status: 'assigned', message: 'Rider assigned' };
+        toast('✅ Rider assigned');
+        if (currentScreen === 'tracking' && currentTrackingOrderId === payload.order_id) navigate('tracking', { order_id: payload.order_id });
+    });
+    socket.on('dispatch_update', payload => {
+        liveDispatchNotice = payload;
+        if (currentScreen === 'tracking' && currentTrackingOrderId === payload.order_id) navigate('tracking', { order_id: payload.order_id });
+    });
+}
+
+function updateLiveDispatchNotice(payload) {
+    const el = document.getElementById('live-dispatch-status');
+    if (!el || !payload || (currentOrder && payload.order_id !== currentOrder.order_id)) return;
+    el.innerHTML = `
+        <div style="display:flex; gap:10px; align-items:center;">
+            <span class="material-icons-round" style="font-size:20px; color:#5B2FE8;">rss_feed</span>
+            <div>
+                <div style="font-size:13px; font-weight:700;">${payload.message || 'Dispatch update received'}</div>
+                <div style="font-size:11px; color:#8e8e93;">${payload.riders_offered ? payload.riders_offered + ' rider(s) notified' : payload.status || 'live'}${payload.timeout_seconds ? ' • expires in ' + payload.timeout_seconds + 's' : ''}</div>
+            </div>
+        </div>
+    `;
+}
+
 // ─── Router ───
 function navigate(screen, data = {}) {
+    currentScreen = screen;
+    currentTrackingOrderId = screen === 'tracking' ? data.order_id : '';
     const hideNav = ['login', 'otp', 'send_parcel', 'estimate', 'tracking'];
     phoneFrame.classList.toggle('hide-nav', hideNav.includes(screen));
     document.querySelectorAll('.nav-item').forEach(i => i.classList.toggle('active', i.dataset.screen === screen));
@@ -152,6 +194,7 @@ async function verifyOTP(mobile) {
         customer = res.data.customer;
         wallet = res.data.wallet;
         saveState();
+        connectSocket();
         toast('✅ Logged in!');
         navigate('home');
     }
@@ -231,19 +274,21 @@ function renderSendParcel() {
                 </div>
             </div>
             <div class="card">
-                <div class="input-group"><label>Pickup Address</label><input type="text" class="input-field" id="f-pickup-addr" value="Cafe Coffee Day, Bandra West, Mumbai"></div>
+                <div class="input-group"><label>Pickup Address</label><input type="text" class="input-field" id="f-pickup-addr" placeholder="Use current location or enter pickup address"></div>
                 <div style="display:flex; gap:8px;">
-                    <div class="input-group" style="flex:1;"><label>Pickup Lat</label><input type="number" class="input-field" id="f-pickup-lat" value="19.0596" step="0.0001"></div>
-                    <div class="input-group" style="flex:1;"><label>Pickup Lng</label><input type="number" class="input-field" id="f-pickup-lng" value="72.8295" step="0.0001"></div>
+                    <div class="input-group" style="flex:1;"><label>Pickup Lat</label><input type="number" class="input-field" id="f-pickup-lat" step="0.000001" placeholder="Detecting..."></div>
+                    <div class="input-group" style="flex:1;"><label>Pickup Lng</label><input type="number" class="input-field" id="f-pickup-lng" step="0.000001" placeholder="Detecting..."></div>
                 </div>
-                <div class="input-group"><label>Pickup Contact</label><input type="text" class="input-field" id="f-pickup-name" value="Store Manager"></div>
+                <button class="btn btn-secondary btn-sm" onclick="useCurrentPickupLocation()">Use Current Location</button>
+                <div id="pickup-location-status" style="font-size:11px; color:#8e8e93; margin-top:8px;">Requesting live location...</div>
+                <div class="input-group"><label>Pickup Contact</label><input type="text" class="input-field" id="f-pickup-name" value="${customer?.name || 'Customer'}"></div>
                 <div class="input-group"><label>Pickup Phone</label><input type="tel" class="input-field" id="f-pickup-phone" value="9876543210" maxlength="10"></div>
             </div>
             <div class="card">
-                <div class="input-group"><label>Dropoff Address</label><input type="text" class="input-field" id="f-drop-addr" value="14B, Juhu Scheme, Mumbai"></div>
+                <div class="input-group"><label>Dropoff Address</label><input type="text" class="input-field" id="f-drop-addr" value="Drop location near 28.6366, 77.2743"></div>
                 <div style="display:flex; gap:8px;">
-                    <div class="input-group" style="flex:1;"><label>Dropoff Lat</label><input type="number" class="input-field" id="f-drop-lat" value="19.0728" step="0.0001"></div>
-                    <div class="input-group" style="flex:1;"><label>Dropoff Lng</label><input type="number" class="input-field" id="f-drop-lng" value="72.8826" step="0.0001"></div>
+                    <div class="input-group" style="flex:1;"><label>Dropoff Lat</label><input type="number" class="input-field" id="f-drop-lat" value="28.6366" step="0.0001"></div>
+                    <div class="input-group" style="flex:1;"><label>Dropoff Lng</label><input type="number" class="input-field" id="f-drop-lng" value="77.2743" step="0.0001"></div>
                 </div>
                 <div class="input-group"><label>Receiver Name</label><input type="text" class="input-field" id="f-drop-name" value="Priya Sharma"></div>
                 <div class="input-group"><label>Receiver Phone</label><input type="tel" class="input-field" id="f-drop-phone" value="9871234567" maxlength="10"></div>
@@ -255,16 +300,49 @@ function renderSendParcel() {
             <div style="padding:12px 16px;"><button class="btn btn-primary" onclick="getEstimate()">Get Price Estimate →</button></div>
         </div>
     `;
+    useCurrentPickupLocation();
 }
 
 async function getEstimate() {
     const data = getFormData();
+    if (!Number.isFinite(data.pickup_lat) || !Number.isFinite(data.pickup_lng)) {
+        toast('Please allow current location or enter pickup coordinates.');
+        return;
+    }
     const res = await api('POST', '/api/orders/estimate', {
         pickup: { lat: data.pickup_lat, lng: data.pickup_lng },
         dropoff: { lat: data.drop_lat, lng: data.drop_lng },
         parcel: { weight_kg: data.weight }
     });
     if (res.success) navigate('estimate', { ...data, pricing: res.data });
+}
+
+function useCurrentPickupLocation() {
+    const statusEl = document.getElementById('pickup-location-status');
+    if (!navigator.geolocation) {
+        if (statusEl) statusEl.textContent = 'Live location is not supported in this browser.';
+        return;
+    }
+    if (statusEl) statusEl.textContent = 'Getting live location...';
+    navigator.geolocation.getCurrentPosition(
+        pos => {
+            const lat = Number(pos.coords.latitude.toFixed(6));
+            const lng = Number(pos.coords.longitude.toFixed(6));
+            const latEl = document.getElementById('f-pickup-lat');
+            const lngEl = document.getElementById('f-pickup-lng');
+            const addrEl = document.getElementById('f-pickup-addr');
+            if (latEl) latEl.value = lat;
+            if (lngEl) lngEl.value = lng;
+            if (addrEl && !addrEl.value.trim()) addrEl.value = `Current location (${lat}, ${lng})`;
+            if (statusEl) statusEl.textContent = `Live location selected. Accuracy ~${Math.round(pos.coords.accuracy)}m.`;
+        },
+        err => {
+            if (statusEl) statusEl.textContent = err.code === err.PERMISSION_DENIED
+                ? 'Location permission denied. Allow location or enter pickup coordinates manually.'
+                : 'Could not get live location. Enter pickup coordinates manually.';
+        },
+        { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 }
+    );
 }
 
 function getFormData() {
@@ -310,32 +388,138 @@ function renderEstimate(data) {
                 <div style="display:flex; justify-content:space-between; font-size:14px; font-weight:700; padding:8px 0; border-top:1px solid #f0f0f0; margin-top:4px;"><span>Total</span><span>${p?.display_total || '—'}</span></div>
             </div>
             <div class="card">
-                <div style="display:flex; align-items:center; gap:8px;">
-                    <span class="material-icons-round" style="color:#5B2FE8; font-size:18px;">account_balance_wallet</span>
-                    <div style="flex:1;"><div style="font-size:13px; font-weight:600;">Wallet</div><div style="font-size:11px; color:#8e8e93;">Balance: ${wallet?.display_available || '₹0.00'}</div></div>
-                    <span class="material-icons-round" style="color:#34C759;">check_circle</span>
+                <div style="font-size:13px; font-weight:700; margin-bottom:10px;">Payment Method</div>
+                <div class="payment-options">
+                    <button class="payment-option active" data-payment="wallet" onclick="selectPaymentMethod('wallet')">
+                        <span class="material-icons-round">account_balance_wallet</span>
+                        <span>Wallet</span>
+                        <small>${wallet?.display_available || '₹0.00'}</small>
+                    </button>
+                    <button class="payment-option" data-payment="cash" onclick="selectPaymentMethod('cash')">
+                        <span class="material-icons-round">payments</span>
+                        <span>Cash</span>
+                        <small>Pay on delivery</small>
+                    </button>
+                    <button class="payment-option" data-payment="online" onclick="selectPaymentMethod('online')">
+                        <span class="material-icons-round">credit_card</span>
+                        <span>Online</span>
+                        <small>Dev confirm</small>
+                    </button>
                 </div>
             </div>
-            <div style="padding:0 16px 12px;"><button class="btn btn-primary" onclick="placeOrder()">Confirm & Place Order</button></div>
+            <div id="payment-error"></div>
+            <div style="padding:0 16px 12px;"><button class="btn btn-primary" id="place-order-btn" onclick="placeOrder()">Confirm & Place Order</button></div>
         </div>
     `;
     // Store data for placeOrder
     window._orderData = data;
+    window._paymentMethod = 'wallet';
+    window._orderIdempotencyKey = 'order_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+function selectPaymentMethod(method) {
+    window._paymentMethod = method;
+    document.querySelectorAll('.payment-option').forEach(el => {
+        el.classList.toggle('active', el.dataset.payment === method);
+    });
+    const err = document.getElementById('payment-error');
+    if (err) err.innerHTML = '';
 }
 
 async function placeOrder() {
     const d = window._orderData;
+    const paymentMethod = window._paymentMethod || 'wallet';
+    clearInterval(pollTimer);
+    pollTimer = null;
+    currentOrder = null;
+    currentTrackingOrderId = '';
+    if (paymentMethod === 'wallet' && !walletHasBalance(d)) {
+        showPaymentError('Wallet balance is low. Add money or choose Cash/Online to continue.');
+        return;
+    }
+    const btn = document.getElementById('place-order-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Placing order...'; }
     const res = await api('POST', '/api/orders/create', {
+        idempotency_key: window._orderIdempotencyKey,
         pickup: { lat: d.pickup_lat, lng: d.pickup_lng, address: d.pickup_addr, contact_name: d.pickup_name, contact_phone: d.pickup_phone },
         dropoff: { lat: d.drop_lat, lng: d.drop_lng, address: d.drop_addr, contact_name: d.drop_name, contact_phone: d.drop_phone },
         parcel: { weight_kg: d.weight, special_notes: d.notes },
-        payment_method: 'wallet'
+        payment_method: paymentMethod
     });
     if (res.success) {
         toast('✅ Order placed: ' + res.data.order_id);
         currentOrder = res.data;
+        if (paymentMethod === 'online') {
+            await confirmOnlineOrder(res.data.order_id);
+        }
         navigate('tracking', { order_id: res.data.order_id });
+    } else {
+        if (res.error?.code === 'INSUFFICIENT_BALANCE') {
+            await refreshWallet();
+            showPaymentError(res.error.message || 'Wallet balance is low. Add money or choose Cash/Online to continue.');
+        }
+        if (btn) { btn.disabled = false; btn.textContent = 'Confirm & Place Order'; }
     }
+}
+
+function walletHasBalance(orderData) {
+    const total = orderData.pricing?.pricing?.total || orderData.pricing?.total || 0;
+    return Number(wallet?.available_balance || 0) >= Number(total || 0);
+}
+
+function showPaymentError(message) {
+    const el = document.getElementById('payment-error');
+    if (!el) return;
+    el.innerHTML = `
+        <div class="payment-error">
+            <div><b>${message}</b></div>
+            <div class="payment-error-actions">
+                <button class="btn btn-secondary btn-sm" onclick="navigate('topup')">Add Money</button>
+                <button class="btn btn-secondary btn-sm" onclick="selectPaymentMethod('cash')">Use Cash</button>
+                <button class="btn btn-secondary btn-sm" onclick="selectPaymentMethod('online')">Use Online</button>
+            </div>
+        </div>
+    `;
+}
+
+async function refreshWallet() {
+    if (!wallet?.wallet_id) return;
+    const res = await api('GET', `/api/wallet/${wallet.wallet_id}`);
+    if (res.success) { wallet = res.data; saveState(); }
+}
+
+async function confirmOnlineOrder(orderId) {
+    const res = await api('POST', `/api/orders/${orderId}/online/confirm`, {});
+    if (res.success) toast('✅ Online payment confirmed');
+}
+
+function normalizeTimeline(events, order) {
+    const labels = {
+        order_confirmed: ['Order Confirmed', order.payment?.method === 'cash' ? 'Cash payment selected' : 'Order confirmed'],
+        dispatch_started: ['Finding Rider', 'Searching for nearby riders'],
+        rider_assigned: ['Rider Assigned', `${order.rider?.name || 'Rider'} assigned`],
+        en_route_pickup: ['En-route Pickup', `${order.rider?.name || 'Rider'} is heading to pickup`],
+        arrived_pickup: ['At Pickup', 'Rider arrived at pickup'],
+        picked_up: ['Picked Up', 'Order picked up'],
+        in_transit: ['In Transit', 'Order is on the way'],
+        delivered: ['Delivered', 'Order delivered'],
+        cancelled: ['Cancelled', 'Order cancelled']
+    };
+    const cleaned = (events || []).map(event => {
+        const [title, description] = labels[event.event_type] || [event.title || event.event_type, event.description || ''];
+        return { ...event, title, description: event.description || description };
+    });
+    if (cleaned.length) return cleaned;
+    const flow = ['order_confirmed', 'dispatch_started', 'rider_assigned', 'en_route_pickup', 'arrived_pickup', 'picked_up', 'in_transit', 'delivered'];
+    const statusToEvent = { confirmed: 'order_confirmed', searching: 'dispatch_started', assigned: 'rider_assigned', en_route_pickup: 'en_route_pickup', arrived_pickup: 'arrived_pickup', picked_up: 'picked_up', in_transit: 'in_transit', delivered: 'delivered', cancelled: 'cancelled' };
+    const current = statusToEvent[order.status] || 'order_confirmed';
+    const idx = Math.max(0, flow.indexOf(current));
+    const synthetic = flow.slice(0, idx + 1);
+    if (order.status === 'cancelled') synthetic.push('cancelled');
+    return synthetic.map(event_type => {
+        const [title, description] = labels[event_type];
+        return { event_type, title, description, created_at: order.updated_at || order.created_at || new Date().toISOString() };
+    });
 }
 
 // ─── Order Tracking ───
@@ -346,9 +530,10 @@ async function renderTracking(data) {
     const res = await api('GET', `/api/orders/${orderId}`);
     if (!res.success) { app.innerHTML = `<div class="error-msg">Order not found</div>`; return; }
     const order = res.data;
+    currentOrder = order;
 
     const timeRes = await api('GET', `/api/orders/${orderId}/timeline`);
-    const events = timeRes.success ? timeRes.data.events : [];
+    const events = normalizeTimeline(timeRes.success ? timeRes.data.events : [], order);
 
     const statusMessages = {
         confirmed: 'Order confirmed',
@@ -362,9 +547,9 @@ async function renderTracking(data) {
         cancelled: 'Order cancelled',
     };
 
-    const allSteps = ['confirmed', 'searching', 'assigned', 'arrived_pickup', 'picked_up', 'in_transit', 'delivered'];
-    const stepLabels = { confirmed: 'Confirmed', searching: 'Finding Rider', assigned: 'Rider Assigned', arrived_pickup: 'At Pickup', picked_up: 'Picked Up', in_transit: 'In Transit', delivered: 'Delivered' };
-    const currentIdx = allSteps.indexOf(order.status);
+    const allSteps = ['confirmed', 'searching', 'assigned', 'en_route_pickup', 'arrived_pickup', 'picked_up', 'in_transit', 'delivered'];
+    const stepLabels = { confirmed: 'Confirmed', searching: 'Finding Rider', assigned: 'Rider Assigned', en_route_pickup: 'En-route', arrived_pickup: 'At Pickup', picked_up: 'Picked Up', in_transit: 'In Transit', delivered: 'Delivered' };
+    const currentIdx = Math.max(0, allSteps.indexOf(order.status));
 
     let riderHtml = '';
     if (order.rider) {
@@ -403,6 +588,16 @@ async function renderTracking(data) {
 
             ${riderHtml}
 
+            <div class="card" id="live-dispatch-status">
+                <div style="display:flex; gap:10px; align-items:center;">
+                    <span class="material-icons-round" style="font-size:20px; color:#5B2FE8;">travel_explore</span>
+                    <div>
+                        <div style="font-size:13px; font-weight:700;">${liveDispatchNotice?.order_id === orderId ? (liveDispatchNotice.message || 'Dispatch update received') : (order.status === 'searching' ? 'Searching nearby riders' : statusMessages[order.status] || order.status)}</div>
+                        <div style="font-size:11px; color:#8e8e93;">Live rider matching updates appear here</div>
+                    </div>
+                </div>
+            </div>
+
             <div class="card">
                 <div style="font-size:12px; font-weight:700; margin-bottom:8px;">Progress</div>
                 <div class="timeline">
@@ -439,9 +634,11 @@ async function renderTracking(data) {
         </div>
     `;
 
-    // Auto-poll if order is active
+    // Socket updates drive live tracking; this is only a slow reconnect/fallback refresh.
     if (['searching', 'assigned', 'en_route_pickup', 'arrived_pickup', 'picked_up', 'in_transit'].includes(order.status)) {
-        pollTimer = setInterval(() => navigate('tracking', { order_id: orderId }), 10000);
+        pollTimer = setInterval(() => {
+            if (!socket || !socket.connected) navigate('tracking', { order_id: orderId });
+        }, 60000);
     }
 }
 
@@ -588,38 +785,56 @@ async function initiateTopup() {
 
     const statusEl = document.getElementById('topup-status');
 
-    // Check if there's a dev confirm endpoint
     statusEl.innerHTML = `
         <div class="success-msg">
-            ✅ Top-up initiated (${res.data.status})<br>
+            Razorpay checkout opened (${res.data.status})<br>
             Payment ID: ${res.data.payment_txn_id}<br>
-            Gateway Order: ${res.data.gateway_order_id || 'N/A'}
+            Gateway Order: ${res.data.gateway_order_id || 'N/A'}<br>
+            Amount: ₹${(res.data.amount / 100).toFixed(2)}
         </div>
         <div style="padding:8px 16px;">
-            <button class="btn btn-success btn-sm" onclick="confirmTopup('${res.data.payment_txn_id}')">
-                ✓ Confirm Payment (Dev)
+            <button class="btn btn-success btn-sm" onclick="simulateTopupSuccess('${res.data.payment_txn_id}')">
+                Payment Success
+            </button>
+            <button class="btn btn-secondary btn-sm" onclick="simulateTopupFailure('${res.data.payment_txn_id}')" style="margin-top:8px;">
+                Payment Failed
             </button>
         </div>
     `;
 }
 
-async function confirmTopup(paymentTxnId) {
-    // Try dev confirm endpoint
-    let res = await api('POST', '/api/wallet/topup/confirm', { payment_txn_id: paymentTxnId });
-
-    // If that doesn't exist, try alternative paths
-    if (!res.success && res.error?.code === 'NETWORK') {
-        res = await api('POST', `/api/wallet/topup/${paymentTxnId}/confirm`, {});
-    }
-
+async function simulateTopupSuccess(paymentTxnId) {
+    const res = await api('POST', `/api/wallet/topup/simulate/${paymentTxnId}/success`, {
+        gateway_payment_id: 'pay_sim_' + Date.now(),
+        status: 'captured'
+    });
     if (res.success) {
-        toast('✅ Money added! New balance: ' + (res.data.display_new_balance || ''));
-        // Refresh wallet
+        toast('Money added. New balance: ' + (res.data.display_new_balance || ''));
         const wRes = await api('GET', `/api/wallet/${wallet.wallet_id}`);
         if (wRes.success) { wallet = wRes.data; saveState(); }
         navigate('wallet');
     } else {
-        toast('⚠️ Confirm failed — check API log');
+        toast('Payment capture failed');
+    }
+}
+
+async function simulateTopupFailure(paymentTxnId) {
+    const res = await api('POST', `/api/wallet/topup/simulate/${paymentTxnId}/failure`, {
+        gateway_payment_id: 'pay_sim_' + Date.now(),
+        reason: 'customer_cancelled'
+    });
+    if (res.success) {
+        const statusEl = document.getElementById('topup-status');
+        if (statusEl) {
+            statusEl.innerHTML = `
+                <div class="error-msg">
+                    Payment failed. Wallet was not credited.
+                </div>
+            `;
+        }
+        toast('Payment failed. Please try again or choose cash/online.');
+    } else {
+        toast('Payment failure update failed');
     }
 }
 
@@ -668,6 +883,7 @@ function logout() {
 
 // ─── Init ───
 if (token && customer) {
+    connectSocket();
     navigate('home');
 } else {
     navigate('login');
