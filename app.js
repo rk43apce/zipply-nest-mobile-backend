@@ -122,7 +122,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
 function render(screen, data = {}) {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     switch(screen) {
-        case 'login': return renderLogin();
+        case 'login': return renderLogin(data);
         case 'otp': return renderOTP(data);
         case 'home': return renderHome();
         case 'send_parcel': return renderSendParcel();
@@ -137,7 +137,8 @@ function render(screen, data = {}) {
 }
 
 // ─── Auth Screens ───
-function renderLogin() {
+function renderLogin(data = {}) {
+    const mobile = data.mobile || '';
     app.innerHTML = `
         <div class="screen" style="padding:32px 20px;">
             <div style="text-align:center; margin-bottom:24px;">
@@ -148,7 +149,7 @@ function renderLogin() {
                 <label>Mobile Number</label>
                 <div style="display:flex; border:1.5px solid #e5e5ea; border-radius:12px; overflow:hidden;">
                     <span style="padding:12px; background:#f8f8fa; font-size:14px; font-weight:600; border-right:1px solid #e5e5ea;">+91</span>
-                    <input type="tel" id="login-phone" class="input-field" style="border:none; border-radius:0;" placeholder="9871234567" maxlength="10">
+                    <input type="tel" id="login-phone" class="input-field" style="border:none; border-radius:0;" placeholder="9871234567" maxlength="10" value="${mobile}">
                 </div>
             </div>
             <button class="btn btn-primary" onclick="sendOTP()">Send OTP</button>
@@ -169,17 +170,23 @@ async function sendOTP() {
 function renderOTP(data) {
     app.innerHTML = `
         <div class="screen" style="padding:32px 20px;">
-            <button style="border:none; background:none; color:#5B2FE8; font-size:14px; font-weight:600; cursor:pointer;" onclick="navigate('login')">← Back</button>
+            <button style="border:none; background:none; color:#5B2FE8; font-size:14px; font-weight:600; cursor:pointer;" onclick="navigate('login', { mobile: '${data.mobile}' })">← Back</button>
             <div style="text-align:center; margin:20px 0;">
                 <h1 style="font-size:22px; font-weight:800;">Verify OTP</h1>
                 <p style="font-size:13px; color:#8e8e93;">Sent to +91 ${data.mobile}</p>
-                ${data.dev_otp ? `<p style="font-size:12px; color:#5B2FE8; margin-top:4px;">Dev OTP: ${data.dev_otp}</p>` : ''}
             </div>
+            ${data.dev_otp ? `
+                <div style="border:1px solid #ddd6fe; background:#f5f3ff; border-radius:14px; padding:14px; margin-bottom:16px; text-align:center;">
+                    <div style="font-size:11px; font-weight:800; color:#5B2FE8; text-transform:uppercase;">Test OTP</div>
+                    <div style="font-size:30px; font-weight:900; color:#1a1a2e; letter-spacing:8px; margin-top:4px;">${data.dev_otp}</div>
+                </div>
+            ` : ''}
             <div class="input-group">
                 <label>Enter OTP</label>
                 <input type="text" id="otp-input" class="input-field" placeholder="1234" maxlength="4" style="text-align:center; font-size:24px; font-weight:700; letter-spacing:12px;">
             </div>
             <button class="btn btn-primary" onclick="verifyOTP('${data.mobile}')">Verify & Continue</button>
+            <button class="btn btn-secondary" style="margin-top:10px;" onclick="navigate('login', { mobile: '${data.mobile}' })">Change Number</button>
         </div>
     `;
     document.getElementById('otp-input').value = data.dev_otp || '';
